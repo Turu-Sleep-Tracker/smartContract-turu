@@ -22,18 +22,24 @@ contract SleepNFTTest is Test {
     uint256 BASE_PRICE = 0.05 ether;
     uint256 DECAY_RATE = 0.001 ether;
 
-    function setUp() public {
-        verifier = new MockZkTLSVerifier();
-        nft = new SleepNFT(address(verifier), BASE_PRICE, DECAY_RATE);
-        vm.deal(user, 10 ether);
-    }
+   function setUp() public {
+    // Warp block.timestamp ke nilai yang cukup tinggi
+    vm.warp(1_000_000);
+    
+    verifier = new MockZkTLSVerifier();
+    nft = new SleepNFT(address(verifier), BASE_PRICE, DECAY_RATE);
+    vm.deal(user, 10 ether);
+}
+
 
     // Test minting NFT dengan data valid
     function testMintNFT() public {
         vm.startPrank(user);
 
         uint256 startTime = block.timestamp - 8 hours;
-        uint256 expectedPrice = BASE_PRICE - (DECAY_RATE * (block.timestamp - startTime));
+        uint256 elapsedTime = block.timestamp - startTime;
+        uint256 expectedPrice = BASE_PRICE - (DECAY_RATE * (elapsedTime / 3600));
+// Untuk 8 jam: expectedPrice = 0.05 ether - (0.001 ether * 8) = 0.05 ether - 0.008 ether = 0.042 ether
 
         nft.mintSleepNFT{value: expectedPrice}(
             "",
@@ -58,11 +64,13 @@ contract SleepNFTTest is Test {
     }
 
     // Test harga NFT dengan VRGDA
-    function testPriceCalculation() public {
-        uint256 elapsedTime = 3600; // 1 jam
-        uint256 expectedPrice = BASE_PRICE - (DECAY_RATE * elapsedTime);
-        assertEq(nft.calculatePrice(elapsedTime), expectedPrice);
-    }
+   function testPriceCalculation() public {
+    uint256 elapsedTime = 3600; // 1 jam
+    // Harga yang diharapkan: BASE_PRICE - DECAY_RATE * (3600/3600)
+    uint256 expectedPrice = BASE_PRICE - (DECAY_RATE * 1);
+    assertEq(nft.calculatePrice(elapsedTime), expectedPrice);
+}
+
 
     // Test pembayaran kurang
     function testInsufficientPayment() public {

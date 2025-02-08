@@ -40,15 +40,23 @@ contract SleepNFT is ERC721URIStorage, Ownable {
         address _zkTlsVerifier,
         uint256 _basePrice,
         uint256 _decayRate
-    ) ERC721("SleepNFT", "SLEEP") {
+    )
+        ERC721("SleepNFT", "SLEEP")
+        Ownable(msg.sender)
+    {
         zkTlsVerifier = IZkTLSVerifier(_zkTlsVerifier);
         basePrice = _basePrice;
         decayRate = _decayRate;
     }
 
-    // Hitung harga NFT berdasarkan waktu yang berlalu (VRGDA)
+    // Hitung harga NFT berdasarkan waktu yang berlalu (mengonversi detik ke jam)
     function calculatePrice(uint256 elapsedTime) public view returns (uint256) {
-        return basePrice - (decayRate * elapsedTime);
+        uint256 hoursElapsed = elapsedTime / 3600;
+        uint256 discount = decayRate * hoursElapsed;
+        if (discount >= basePrice) {
+            return 0;
+        }
+        return basePrice - discount;
     }
 
     // Mint NFT dengan data tidur
@@ -72,7 +80,10 @@ contract SleepNFT is ERC721URIStorage, Ownable {
             "Invalid zkTLS proof"
         );
 
-        // Hitung harga dan validasi pembayaran
+        // Pastikan _startTime tidak di masa depan
+        require(_startTime <= block.timestamp, "Start time must be in the past");
+
+        // Hitung harga NFT (elapsedTime dalam detik)
         uint256 elapsedTime = block.timestamp - _startTime;
         uint256 nftPrice = calculatePrice(elapsedTime);
         require(msg.value >= nftPrice, "Insufficient payment");
@@ -105,7 +116,7 @@ contract SleepNFT is ERC721URIStorage, Ownable {
     }
 
     function getSleepData(uint256 tokenId) external view returns (SleepData memory) {
-        require(_exists(tokenId), "NFT does not exist");
+        ownerOf(tokenId);
         return sleepRecords[tokenId];
     }
 
