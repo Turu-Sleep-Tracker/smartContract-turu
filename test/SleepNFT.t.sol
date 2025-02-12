@@ -4,152 +4,152 @@ pragma solidity ^0.8.19;
 import "forge-std/Test.sol";
 import "../src/SleepNFT.sol";
 import "../src/SleepToken.sol";
-
-// Mock zkTLS Verifier untuk testing
-contract MockZkTLSVerifier is IZkTLSVerifier {
-    function verifyProof(
-        bytes calldata /*proof*/,
-        bytes32 /*root*/,
-        bytes32[] calldata /*publicInputs*/
-    ) external pure override returns (bool) {
-        return true; // Selalu return true untuk testing
-    }
-}
+import "../src/mocks/ZkTlsVerifierMock.sol";
+import "../src/libraries/SleepDataLib.sol";
 
 contract SleepNFTTest is Test {
-    SleepNFT nft;
-    SleepToken token;
-    MockZkTLSVerifier verifier;
-    address user = address(1);
-    uint256 BASE_PRICE = 0.05 ether;
-    uint256 DECAY_RATE = 0.001 ether;
+    SleepNFT public sleepNFT;
+    SleepToken public sleepToken;
+    ZkTlsVerifierMock public verifierMock;
+    address public addr1 = address(0x1);
+
+    // Harga NFT sesuai dengan deployment, misalnya 0.01 ether
+    uint256 nftPrice = 0.01 ether;
 
     function setUp() public {
-        // Warp block.timestamp ke nilai yang cukup tinggi agar pengurangan 8 hours tidak underflow
-        vm.warp(1_000_000);
+        // Set block.timestamp ke nilai nonzero agar perhitungan waktu tidak underflow
+        vm.warp(10000);
 
-        verifier = new MockZkTLSVerifier();
-        nft = new SleepNFT(address(verifier), BASE_PRICE, DECAY_RATE);
-        vm.deal(user, 10 ether);
+        // Deploy mock verifier
+        verifierMock = new ZkTlsVerifierMock();
 
-        // Deploy SleepToken dan transfer kepemilikan ke kontrak NFT sehingga NFT bisa mint token reward
-        token = new SleepToken();
-        token.transferOwnership(address(nft));
-        nft.setRewardToken(address(token));
+        // Deploy SleepToken
+        sleepToken = new SleepToken();
+
+        // Deploy SleepNFT dengan alamat verifier dan harga NFT
+        sleepNFT = new SleepNFT(address(verifierMock), nftPrice);
+
+        // Set kontrak SleepNFT sebagai minter untuk SleepToken dan tetapkan reward token di SleepNFT
+        sleepToken.setMinter(address(sleepNFT));
+        sleepNFT.setRewardToken(address(sleepToken));
+
+        // Berikan addr1 saldo ether untuk keperluan testing
+        vm.deal(addr1, 1 ether);
     }
 
-    // Test minting NFT dengan data tidur dan perhitungan reward
-    function testMintNFTWithReward() public {
-        vm.startPrank(user);
+    function testMultipleNFTsAndUpdateWithStreak() public {
+        // addr1 membeli NFT pertama dengan effect = 2, dengan pembayaran nftPrice
+        vm.prank(addr1);
+        sleepNFT.buySleepNFT{value: nftPrice}("ipfs://nft1", 2);
 
-        uint256 startTime = block.timestamp - 8 hours;
-        uint256 elapsedTime = block.timestamp - startTime;
-        uint256 expectedPrice = BASE_PRICE - (DECAY_RATE * (elapsedTime / 3600));
-        // Contoh: untuk 8 jam, expectedPrice = 0.05 ether - (0.001 ether * 8) = 0.042 ether
+        // addr1 membeli NFT kedua dengan effect = 3, dengan pembayaran nftPrice
+        vm.prank(addr1);
+        sleepNFT.buySleepNFT{value: nftPrice}("ipfs://nft2", 3);
 
-        nft.mintSleepNFT{value: expectedPrice}(
-            "",
-            bytes32(0),
-            new bytes32[](0),
-            60,   // hrv
-            70,   // rhr
-            240,  // deepSleep (50% dari 480, sehingga kualitas baik)
-            180,  // lightSleep
-            60,   // remSleep
-            startTime,
-            block.timestamp,
-            480,  // duration (8 jam dalam menit)
-            "ipfs://test"
+        // Verifikasi kepemilikan NFT
+        assertEq(sleepNFT.ownerOf(0), addr1);
+        assertEq(sleepNFT.ownerOf(1), addr1);
+
+        // Data dummy untuk update sleep data (menggunakan proof valid dari mock)
+        bytes memory dummyProof = hex"1234";
+        bytes32 dummyRoot = bytes32(0);
+        bytes32[] memory dummyPublicInputs = new bytes32[](0);
+
+        // Update pada NFT tokenId 0 dengan startTime = block.timestamp - 3600
+        uint256 startTime1 = block.timestamp - 3600; // 10000 - 3600 = 6400
+        vm.prank(addr1);
+        sleepNFT.updateSleepData(
+            0,
+            dummyProof,
+            dummyRoot,
+            dummyPublicInputs,
+            50, 60, 1800, 3600, 900,
+            startTime1,
+            startTime1 + 7200,
+            7200,
+            75,      // qualityIndex >= goodSleepThreshold (baik)
+            "baik"
         );
+        SleepDataLib.SleepData[] memory records0 = sleepNFT.getSleepData(0);
+        // Expected: baseReward 10e18 * streak (1) * effect (2) = 20e18
+        uint256 reward0 = records0[0].rewardAmount;
+        assertEq(reward0, 10e18 * 1 * 2);
 
-        // Verifikasi NFT telah diterbitkan
-        assertEq(nft.ownerOf(0), user);
-        SleepNFT.SleepData memory data = nft.getSleepData(0);
-        // Karena tidur berkualitas dan ini adalah sesi pertama, consecutiveGoodSleepCount = 1
-        // Reward = 10 * 1e18 * 1 = 10e18
-        assertEq(data.rewardAmount, 10 * 1e18);
-        assertEq(data.rewardClaimed, false);
-        vm.stopPrank();
+        // Lakukan update kedua pada NFT tokenId 0 secara berturut-turut (streak naik menjadi 2)
+        uint256 startTime2 = startTime1 + 3600; // 6400 + 3600 = 10000
+        vm.prank(addr1);
+        sleepNFT.updateSleepData(
+            0,
+            dummyProof,
+            dummyRoot,
+            dummyPublicInputs,
+            55, 65, 1900, 3700, 950,
+            startTime2,
+            startTime2 + 7200,
+            7200,
+            80,      // masih baik
+            "sangat baik"
+        );
+        records0 = sleepNFT.getSleepData(0);
+        // Expected: streak multiplier naik menjadi 2: reward = 10e18 * 2 * effect (2) = 40e18
+        uint256 reward0_second = records0[1].rewardAmount;
+        assertEq(reward0_second, 10e18 * 2 * 2);
+
+        // Untuk update pada NFT tokenId 1, gunakan startTime yang lebih besar:
+        uint256 startTime3 = startTime2 + 3600; // 10000 + 3600 = 13600
+        vm.warp(startTime3); // Update block.timestamp ke 13600 agar _startTime <= block.timestamp
+        vm.prank(addr1);
+        sleepNFT.updateSleepData(
+            1,
+            dummyProof,
+            dummyRoot,
+            dummyPublicInputs,
+            50, 60, 1800, 3600, 900,
+            startTime3,
+            startTime3 + 7200,
+            7200,
+            75,
+            "baik"
+        );
+        SleepDataLib.SleepData[] memory records1 = sleepNFT.getSleepData(1);
+        // Expected: reward = 10e18 * streak (1) * effect (3) = 30e18
+        uint256 reward1 = records1[0].rewardAmount;
+        assertEq(reward1, 10e18 * 3 * 3);
+
+        // Klaim reward untuk record pertama pada NFT tokenId 0
+        vm.prank(addr1);
+        sleepNFT.claimReward(0, 0);
+        uint256 balanceReward = sleepToken.balanceOf(addr1);
+        assertEq(balanceReward, reward0);
     }
 
-    // Test klaim reward token
-    function testClaimReward() public {
-        vm.startPrank(user);
-        uint256 startTime = block.timestamp - 8 hours;
-        uint256 elapsedTime = block.timestamp - startTime;
-        uint256 expectedPrice = BASE_PRICE - (DECAY_RATE * (elapsedTime / 3600));
+    function testUpdateFailsIfInvalidZkProof() public {
+        // addr1 membeli NFT dengan pembayaran nftPrice
+        vm.prank(addr1);
+        sleepNFT.buySleepNFT{value: nftPrice}("ipfs://nft1", 2);
 
-        // Mint NFT
-        nft.mintSleepNFT{value: expectedPrice}(
-            "",
-            bytes32(0),
-            new bytes32[](0),
-            60,
-            70,
-            240,
-            180,
-            60,
-            startTime,
-            block.timestamp,
-            480,
-            "ipfs://test"
-        );
+        uint256 tokenId = 0;
 
-        // Sebelum claim, balance token harus 0
-        assertEq(token.balanceOf(user), 0);
+        // Set verifier agar mengembalikan false
+        verifierMock.setShouldVerify(false);
 
-        // Claim reward untuk tokenId 0
-        nft.claimReward(0);
+        bytes memory dummyProof = hex"dead";
+        bytes32 dummyRoot = bytes32(0);
+        bytes32[] memory dummyPublicInputs = new bytes32[](0);
 
-        // Setelah klaim, balance token harus bertambah sebesar 10e18
-        assertEq(token.balanceOf(user), 10 * 1e18);
-
-        // Mencoba claim kembali harus gagal
-        vm.expectRevert("Reward already claimed");
-        nft.claimReward(0);
-        vm.stopPrank();
-    }
-
-    // Test minting gagal karena pembayaran tidak cukup
-    function testInsufficientPayment() public {
-        vm.startPrank(user);
-        vm.expectRevert("Insufficient payment");
-        nft.mintSleepNFT{value: 0.01 ether}(
-            "",
-            bytes32(0),
-            new bytes32[](0),
-            60, 70, 240, 180, 60,
-            block.timestamp - 8 hours,
-            block.timestamp,
-            480,
-            "ipfs://test"
-        );
-        vm.stopPrank();
-    }
-
-    // Test minting gagal karena zkTLS proof tidak valid
-    function testInvalidZkTLSProof() public {
-        // Buat verifier mock yang return false
-        MockZkTLSVerifier invalidVerifier = new MockZkTLSVerifier();
-        vm.mockCall(
-            address(invalidVerifier),
-            abi.encodeWithSelector(MockZkTLSVerifier.verifyProof.selector),
-            abi.encode(false)
-        );
-
-        SleepNFT invalidNFT = new SleepNFT(address(invalidVerifier), BASE_PRICE, DECAY_RATE);
-        vm.startPrank(user);
+        vm.prank(addr1);
         vm.expectRevert("Invalid zkTLS proof");
-        invalidNFT.mintSleepNFT{value: BASE_PRICE}(
-            "",
-            bytes32(0),
-            new bytes32[](0),
-            60, 70, 240, 180, 60,
-            block.timestamp - 8 hours,
-            block.timestamp,
-            480,
-            "ipfs://test"
+        sleepNFT.updateSleepData(
+            tokenId,
+            dummyProof,
+            dummyRoot,
+            dummyPublicInputs,
+            50, 60, 1800, 3600, 900,
+            block.timestamp - 3600,
+            block.timestamp + 3600,
+            7200,
+            65, // qualityIndex di bawah threshold
+            "cukup"
         );
-        vm.stopPrank();
     }
 }

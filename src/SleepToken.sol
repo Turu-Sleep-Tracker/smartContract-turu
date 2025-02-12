@@ -5,13 +5,22 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 contract SleepToken is ERC20, Ownable {
-    constructor() 
-        ERC20("SleepToken", "SLEEP")
-        Ownable(msg.sender)  // Memanggil konstruktor Ownable dengan msg.sender sebagai pemilik awal
-    {
+    address public minter;
+
+    constructor() ERC20("SleepToken", "SLP") Ownable(msg.sender) {
+        // Konstruktor Ownable sekarang menerima msg.sender sebagai initialOwner.
     }
-     
-    function mint(address to, uint256 amount) external onlyOwner {
-         _mint(to, amount);
+
+    modifier onlyMinter() {
+        require(msg.sender == minter, "Not minter");
+        _;
+    }
+
+    function setMinter(address _minter) external onlyOwner {
+        minter = _minter;
+    }
+
+    function mint(address to, uint256 amount) external onlyMinter {
+        _mint(to, amount);
     }
 }

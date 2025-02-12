@@ -3,188 +3,165 @@ pragma solidity ^0.8.19;
 
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/math/Math.sol";
-
-/// Interface untuk zkTLS Verifier
-interface IZkTLSVerifier {
-    function verifyProof(
-        bytes calldata proof,
-        bytes32 root,
-        bytes32[] calldata publicInputs
-    ) external view returns (bool);
-}
-
-// Import SleepToken (reward token)
+import "./interfaces/IZkTLSVerifier.sol";
 import "./SleepToken.sol";
+import "./libraries/RewardCalculator.sol";
+import "./libraries/SleepDataLib.sol";
 
 contract SleepNFT is ERC721URIStorage, Ownable {
-    // Struktur data tidur diperluas dengan reward info
-    struct SleepData {
-        uint256 hrv;
-        uint256 rhr;
-        uint256 deepSleep;
-        uint256 lightSleep;
-        uint256 remSleep;
-        uint256 startTime;
-        uint256 wakeTime;
-        uint256 duration;
-        uint256 purchaseTimestamp;
-        uint256 rewardAmount; // jumlah token reward yang dihitung
-        bool rewardClaimed;   // status klaim reward
-    }
+    using RewardCalculator for uint256;
+
+    uint256 private _nextTokenId;
+    // Mapping dari tokenId ke array data tidur (setiap elemen adalah satu sesi)
+    mapping(uint256 => SleepDataLib.SleepData[]) public sleepRecords;
+    // Mapping untuk menyimpan nilai "efek" (multiplier khusus) dari masing-masing NFT
+    mapping(uint256 => uint256) public nftEffects;
+
+    // Harga pembelian NFT (biaya tetap)
+    uint256 public nftPurchasePrice;
+    // Threshold untuk kualitas tidur (misalnya, qualityIndex minimal agar dianggap berkualitas)
+    uint256 public goodSleepThreshold = 70;
 
     IZkTLSVerifier public zkTlsVerifier;
-    uint256 private _nextTokenId;
-    mapping(uint256 => SleepData) public sleepRecords;
-    mapping(address => uint256[]) private _userNFTs;
-    uint256 public basePrice;
-    uint256 public decayRate;
-
-    // Variabel untuk reward
     SleepToken public rewardToken;
-    // Untuk melacak sesi tidur terakhir per user dan jumlah tidur berkualitas berturut-turut
+   
+
+    // Melacak waktu tidur terakhir dan jumlah sesi tidur berkualitas (streak) per user
     mapping(address => uint256) public lastSleepTimestamp;
     mapping(address => uint256) public consecutiveGoodSleepCount;
 
-    event SleepNFTMinted(address indexed user, uint256 tokenId, uint256 timestamp);
+    event SleepNFTPurchased(address indexed user, uint256 tokenId, uint256 timestamp, uint256 nftEffect);
+    event SleepDataUpdated(address indexed user, uint256 tokenId, uint256 recordIndex, uint256 timestamp);
 
-    constructor(
-        address _zkTlsVerifier,
-        uint256 _basePrice,
-        uint256 _decayRate
-    )
+    constructor(address _zkTlsVerifier, uint256 _nftPurchasePrice)
         ERC721("SleepNFT", "SLEEP")
-        Ownable(msg.sender)
+        Ownable(msg.sender) // Panggil konstruktor Ownable dengan msg.sender
     {
         zkTlsVerifier = IZkTLSVerifier(_zkTlsVerifier);
-        basePrice = _basePrice;
-        decayRate = _decayRate;
+        nftPurchasePrice = _nftPurchasePrice;
     }
 
-    // Setter untuk mengatur alamat reward token (SleepToken)
+    /// @notice Setter untuk mengatur alamat token reward.
     function setRewardToken(address tokenAddress) external onlyOwner {
         rewardToken = SleepToken(tokenAddress);
     }
 
-    /// Hitung harga NFT berdasarkan waktu yang berlalu (mengonversi detik ke jam)
-    function calculatePrice(uint256 elapsedTime) public view returns (uint256) {
-        uint256 hoursElapsed = elapsedTime / 3600;
-        uint256 discount = decayRate * hoursElapsed;
-        if (discount >= basePrice) {
-            return 0;
-        }
-        return basePrice - discount;
-    }
+    /**
+     * @notice Fungsi untuk membeli NFT.
+     * @param tokenURI Metadata URI untuk NFT.
+     * @param effect Nilai efek (multiplier khusus) yang akan mempengaruhi reward.
+     */
+    function buySleepNFT(string memory tokenURI, uint256 effect) external payable {
+        require(msg.value >= nftPurchasePrice, "Insufficient payment for NFT purchase");
 
-    /// Mint NFT dengan data tidur dan hitung reward berdasarkan kualitas tidur
-    function mintSleepNFT(
-        bytes calldata proof,
-        bytes32 root,
-        bytes32[] calldata publicInputs,
-        uint256 _hrv,
-        uint256 _rhr,
-        uint256 _deepSleep,
-        uint256 _lightSleep,
-        uint256 _remSleep,
-        uint256 _startTime,
-        uint256 _wakeTime,
-        uint256 _duration,
-        string memory _tokenURI
-    ) external payable {
-        // Validasi zkTLS proof
-        require(
-            zkTlsVerifier.verifyProof(proof, root, publicInputs),
-            "Invalid zkTLS proof"
-        );
-
-        // Pastikan _startTime tidak di masa depan
-        require(_startTime <= block.timestamp, "Start time must be in the past");
-
-        // Hitung harga NFT (elapsedTime dalam detik)
-        uint256 elapsedTime = block.timestamp - _startTime;
-        uint256 nftPrice = calculatePrice(elapsedTime);
-        require(msg.value >= nftPrice, "Insufficient payment");
-
-        // Mint NFT
         uint256 tokenId = _nextTokenId++;
         _mint(msg.sender, tokenId);
-        _setTokenURI(tokenId, _tokenURI);
+        _setTokenURI(tokenId, tokenURI);
 
-        // --- Hitung reward ---
-        // Misalnya: baseReward adalah 10 token (dengan 18 desimal)
-        uint256 baseReward = 10 * 1e18;
+        // Simpan nilai efek untuk NFT ini
+        nftEffects[tokenId] = effect;
 
-        // Tentukan "kualitas tidur" secara sederhana:
-        // Jika deepSleep minimal 30% dari total duration, maka dianggap tidur berkualitas.
-        // Pastikan _duration > 0 untuk menghindari pembagian dengan nol.
-        bool isGoodQuality = (_duration > 0) && ((_deepSleep * 100) / _duration >= 30);
+        emit SleepNFTPurchased(msg.sender, tokenId, block.timestamp, effect);
+    }
 
-        // Jika tidur berkualitas dan jika sesi tidur ini terjadi dalam 24 jam setelah sesi sebelumnya,
-        // maka tingkatkan penghitung tidur berturut-turut. Jika tidak, set ke 1 (atau 0 jika tidak bagus).
-        if (isGoodQuality) {
-            if (lastSleepTimestamp[msg.sender] != 0 && (_startTime - lastSleepTimestamp[msg.sender]) <= 86400) {
-                consecutiveGoodSleepCount[msg.sender] += 1;
-            } else {
-                consecutiveGoodSleepCount[msg.sender] = 1;
-            }
+    /**
+     * @notice Fungsi untuk meng-update data tidur pada NFT tertentu.
+     * @param tokenId NFT yang akan di-update (harus dimiliki oleh pemanggil).
+     * @param proof Bukti zkTLS.
+     * @param root Root untuk verifikasi.
+     * @param publicInputs Input publik untuk verifikasi.
+     * @param _hrv Nilai HRV.
+     * @param _rhr Nilai RHR.
+     * @param _deepSleep Durasi deep sleep (detik).
+     * @param _lightSleep Durasi light sleep (detik).
+     * @param _remSleep Durasi REM sleep (detik).
+     * @param _startTime Waktu mulai tidur (harus <= block.timestamp).
+     * @param _wakeTime Waktu bangun.
+     * @param _duration Durasi tidur.
+     * @param _qualityIndex Nilai kualitas tidur (0-100).
+     * @param _qualityCategory Kategori tidur (misalnya "sangat baik", "baik", dll).
+     */
+    function updateSleepData(
+    uint256 tokenId,
+    bytes calldata proof,
+    bytes32 root,
+    bytes32[] calldata publicInputs,
+    uint256 _hrv,
+    uint256 _rhr,
+    uint256 _deepSleep,
+    uint256 _lightSleep,
+    uint256 _remSleep,
+    uint256 _startTime,
+    uint256 _wakeTime,
+    uint256 _duration,
+    uint256 _qualityIndex,
+    string calldata _qualityCategory
+) external {
+    require(ownerOf(tokenId) == msg.sender, "Not NFT owner");
+    require(_startTime <= block.timestamp, "Start time must be in the past");
+    if (lastSleepTimestamp[msg.sender] != 0) {
+        require(_startTime >= lastSleepTimestamp[msg.sender], "New start time must be >= last sleep timestamp");
+    }
+    require(zkTlsVerifier.verifyProof(proof, root, publicInputs), "Invalid zkTLS proof");
+
+    // Update streak (consecutiveGoodSleepCount):
+    bool isGoodQuality = (_qualityIndex >= goodSleepThreshold);
+    if (isGoodQuality) {
+        if (lastSleepTimestamp[msg.sender] != 0 && (_startTime - lastSleepTimestamp[msg.sender]) <= 86400) {
+            consecutiveGoodSleepCount[msg.sender] += 1;
         } else {
-            consecutiveGoodSleepCount[msg.sender] = 0;
+            consecutiveGoodSleepCount[msg.sender] = 1;
         }
-        // Update waktu tidur terakhir
-        lastSleepTimestamp[msg.sender] = _startTime;
-
-        // Multiplier berdasarkan jumlah sesi tidur berkualitas berturut-turut
-        uint256 multiplier = consecutiveGoodSleepCount[msg.sender];
-        uint256 rewardAmount = baseReward * multiplier;
-        // ---------------------------------
-
-        // Simpan data tidur bersama reward
-        sleepRecords[tokenId] = SleepData({
-            hrv: _hrv,
-            rhr: _rhr,
-            deepSleep: _deepSleep,
-            lightSleep: _lightSleep,
-            remSleep: _remSleep,
-            startTime: _startTime,
-            wakeTime: _wakeTime,
-            duration: _duration,
-            purchaseTimestamp: block.timestamp,
-            rewardAmount: rewardAmount,
-            rewardClaimed: false
-        });
-
-        _userNFTs[msg.sender].push(tokenId);
-        emit SleepNFTMinted(msg.sender, tokenId, block.timestamp);
+    } else {
+        consecutiveGoodSleepCount[msg.sender] = 0;
     }
+    lastSleepTimestamp[msg.sender] = _startTime;
 
-    // Fungsi utilitas untuk mengambil daftar NFT milik user
-    function getUserNFTs(address user) external view returns (uint256[] memory) {
-        return _userNFTs[user];
-    }
+    uint256 baseReward = 10 * 1e18;
+    uint256 multiplier = consecutiveGoodSleepCount[msg.sender];
+    uint256 rewardAmount = RewardCalculator.calculateReward(baseReward, multiplier);
+    uint256 effect = nftEffects[tokenId];
+    rewardAmount = rewardAmount * effect;
 
-    // Fungsi utilitas untuk mendapatkan data tidur dari NFT
-    function getSleepData(uint256 tokenId) external view returns (SleepData memory) {
-        ownerOf(tokenId);
-        return sleepRecords[tokenId];
-    }
+    SleepDataLib.SleepData memory newRecord = SleepDataLib.SleepData({
+        hrv: _hrv,
+        rhr: _rhr,
+        deepSleep: _deepSleep,
+        lightSleep: _lightSleep,
+        remSleep: _remSleep,
+        startTime: _startTime,
+        wakeTime: _wakeTime,
+        duration: _duration,
+        purchaseTimestamp: block.timestamp,
+        rewardAmount: rewardAmount,
+        rewardClaimed: false,
+        qualityIndex: _qualityIndex,
+        qualityCategory: _qualityCategory
+    });
 
-    // Fungsi untuk mengklaim reward token untuk NFT tertentu
-    function claimReward(uint256 tokenId) external {
+    sleepRecords[tokenId].push(newRecord);
+    uint256 recordIndex = sleepRecords[tokenId].length - 1;
+    emit SleepDataUpdated(msg.sender, tokenId, recordIndex, block.timestamp);
+}
+
+
+    /**
+     * @notice Fungsi untuk mengklaim reward dari record data tidur tertentu.
+     * @param tokenId NFT yang dimiliki.
+     * @param recordIndex Indeks record data tidur dalam array.
+     */
+    function claimReward(uint256 tokenId, uint256 recordIndex) external {
         require(ownerOf(tokenId) == msg.sender, "Not NFT owner");
-        SleepData storage data = sleepRecords[tokenId];
-        require(!data.rewardClaimed, "Reward already claimed");
+        require(recordIndex < sleepRecords[tokenId].length, "Invalid record index");
+        SleepDataLib.SleepData storage record = sleepRecords[tokenId][recordIndex];
+        require(!record.rewardClaimed, "Reward already claimed");
         require(address(rewardToken) != address(0), "Reward token not set");
-        data.rewardClaimed = true;
-        // Mint token reward ke wallet pengguna
-        rewardToken.mint(msg.sender, data.rewardAmount);
+        record.rewardClaimed = true;
+        rewardToken.mint(msg.sender, record.rewardAmount);
     }
 
-    // Fungsi admin untuk mengubah harga dasar dan decay rate
-    function setBasePrice(uint256 _newPrice) external onlyOwner {
-        basePrice = _newPrice;
-    }
-
-    function setDecayRate(uint256 _newDecayRate) external onlyOwner {
-        decayRate = _newDecayRate;
+    /// @notice Fungsi untuk mengambil seluruh data tidur yang tersimpan untuk NFT tertentu.
+    function getSleepData(uint256 tokenId) external view returns (SleepDataLib.SleepData[] memory) {
+        return sleepRecords[tokenId];
     }
 }
