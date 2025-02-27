@@ -20,3 +20,5 @@ contract SleepTokenTest is Test {
         assertEq(balance, mintAmount, "Minting SleepToken gagal");
     }
 }
+
+

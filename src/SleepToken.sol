@@ -4,10 +4,12 @@ pragma solidity ^0.8.19;
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
+
+
 contract SleepToken is ERC20, Ownable {
     address public minter;
 
-    constructor() ERC20("SleepToken", "SLP") Ownable(msg.sender) {
+    constructor() ERC20("Turu", "TURU") Ownable(msg.sender) {
         // Konstruktor Ownable sekarang menerima msg.sender sebagai initialOwner.
     }
 
